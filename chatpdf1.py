@@ -106,7 +106,7 @@ def user_input(user_question, pdf_docs):
         st.write("No relevant document found.")
 
 def main():
-    st.set_page_config("Chat PDF")
+    st.set_page_config("TenderAI")
     st.header("TenderAI: Smart solutions for tender queries.")
 
     user_question = st.text_input("Ask a Question from the PDF Files")

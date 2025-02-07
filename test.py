@@ -9,19 +9,35 @@ from langchain.chains.question_answering import load_qa_chain
 from langchain.prompts import PromptTemplate
 from dotenv import load_dotenv
 import fitz  # PyMuPDF
+import docx2txt
+from PIL import Image
+import io
+import zipfile
 
 load_dotenv()
 os.getenv("OPENAI_API_KEY")
 
-def get_pdf_text(pdf_docs):
+def get_file_text(files):
     text_with_sources = []
-    for pdf in pdf_docs:
-        pdf_reader = PdfReader(pdf)
-        for page_num, page in enumerate(pdf_reader.pages):
-            text = page.extract_text()
-            if text:
-                text_with_sources.append((text, pdf.name, page_num + 1))  # (text, document name, page number)
-    return text_with_sources
+    images_with_sources = []
+    for file in files:
+        if file.type == "application/pdf":
+            pdf_reader = PdfReader(file)
+            for page_num, page in enumerate(pdf_reader.pages):
+                text = page.extract_text()
+                if text:
+                    text_with_sources.append((text, file.name, page_num + 1))
+        elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":  # DOCX
+            text = docx2txt.process(file)
+            text_with_sources.append((text, file.name, 1))  # Treat as single-page
+            with zipfile.ZipFile(file, "r") as docx_zip:
+                for image_file in [f for f in docx_zip.namelist() if f.startswith("word/media/")]:
+                    image_data = docx_zip.read(image_file)
+                    images_with_sources.append((image_data, file.name))
+        elif file.type == "text/plain":  # TXT
+            text = file.read().decode("utf-8")
+            text_with_sources.append((text, file.name, 1))  # Treat as single-page
+    return text_with_sources, images_with_sources
 
 def get_text_chunks(text_with_sources):
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=10000, chunk_overlap=1000)
@@ -45,7 +61,6 @@ def get_conversational_chain():
     provided context just say, "answer is not available in the context", don't provide the wrong answer\n\n
     Context:\n {context}?\n
     Question: \n{question}\n
-
     Answer:
     """
 
@@ -54,18 +69,16 @@ def get_conversational_chain():
     chain = load_qa_chain(model, chain_type="stuff", prompt=prompt)
     return chain
 
-def user_input(user_question, pdf_docs):
+def user_input(user_question, files, images_with_sources):
     embeddings = OpenAIEmbeddings()
     new_db = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
     
-    # Retrieve multiple relevant documents for processing
-    docs = new_db.similarity_search(user_question,k=20)  # Increased to 5 for broader context
+    docs = new_db.similarity_search(user_question, k=3)
     
     chain = get_conversational_chain()
     response = chain({"input_documents": docs, "question": user_question}, return_only_outputs=True)
 
     if docs:
-        # Collect unique sources while preserving order
         seen_sources = set()
         unique_sources = []
         for doc in docs:
@@ -79,16 +92,13 @@ def user_input(user_question, pdf_docs):
 
         st.write("Reply: ", response["output_text"])
         
-        # Display all relevant sources
         st.subheader("Relevant Sources:")
         for idx, source in enumerate(unique_sources, 1):
             st.write(f"{idx}. Document: {source['source']}, Page: {source['page']}")
 
-        # Preload PDFs for efficient access
-        pdf_cache = {pdf.name: pdf.getvalue() for pdf in pdf_docs}
+        pdf_cache = {file.name: file.getvalue() for file in files if file.type == "application/pdf"}
 
-        # Display all relevant pages
-        st.subheader("Related Pages:")
+        st.subheader("Related Pages & Images:")
         for source in unique_sources:
             if source["source"] in pdf_cache:
                 try:
@@ -100,8 +110,10 @@ def user_input(user_question, pdf_docs):
                             use_container_width=True)
                 except Exception as e:
                     st.error(f"Couldn't load page {source['page']} from {source['source']}: {str(e)}")
-            else:
-                st.warning(f"Original document {source['source']} not found in current session")
+            
+        for image_data, source_name in images_with_sources:
+            image = Image.open(io.BytesIO(image_data))
+            st.image(image, caption=f"Image from {source_name}", use_container_width=True)
     else:
         st.write("No relevant document found.")
 
@@ -109,20 +121,23 @@ def main():
     st.set_page_config("TenderAI")
     st.header("TenderAI: Smart solutions for tender queries.")
 
-    user_question = st.text_input("Ask a Question from the PDF Files")
+    user_question = st.text_input("Ask a Question from the Uploaded Files")
+    images_with_sources = []  # Ensure it's always initialized
 
     with st.sidebar:
         st.title("Menu:")
-        pdf_docs = st.file_uploader("Upload your PDF Files and Click on the Submit & Process Button", accept_multiple_files=True)
+        files = st.file_uploader("Upload your PDF, DOCX, or TXT Files and Click on the Submit & Process Button", 
+                                  accept_multiple_files=True, 
+                                  type=["pdf", "docx", "txt"])
         if st.button("Submit & Process"):
             with st.spinner("Processing..."):
-                raw_text_with_sources = get_pdf_text(pdf_docs)
+                raw_text_with_sources, images_with_sources = get_file_text(files)
                 text_chunks_with_sources = get_text_chunks(raw_text_with_sources)
                 get_vector_store(text_chunks_with_sources)
                 st.success("Done")
 
-    if user_question and pdf_docs:
-        user_input(user_question, pdf_docs)
+    if user_question and files:
+        user_input(user_question, files, images_with_sources)
 
 if __name__ == "__main__":
     main()

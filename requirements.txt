@@ -10,3 +10,4 @@ langchain-community
 pymupdf
 openai
 tiktoken
+docx2txt
